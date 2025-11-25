@@ -19,6 +19,7 @@ classdef FluxPredictorApp < matlab.apps.AppBase
 
         Model                % Trained regression model (LinearModel)
         TrainingData         table
+        ActiveFeatureNames   cell
         FeatureNames         cell
         DataFile             string
     end
@@ -50,6 +51,34 @@ classdef FluxPredictorApp < matlab.apps.AppBase
 
             % Fit a linear model using only the requested numeric predictors.
             X = data(:, app.FeatureNames);
+            numericX = X{:, :};
+
+            % Detect and drop linearly dependent predictors to avoid rank
+            % deficiency warnings from FITLM.
+            [~, R, pivotIdx] = qr(numericX, 0);
+            tol = max(size(numericX)) * eps(norm(R, 'fro'));
+            rankR = sum(abs(diag(R)) > tol);
+            independentIdx = sort(pivotIdx(1:rankR));
+
+            if rankR == 0
+                warning('FluxPredictorApp:NoPredictors', ...
+                    'No independent predictors available after cleaning the data.');
+                app.Model = [];
+                app.TrainingData = [];
+                app.ActiveFeatureNames = {};
+                return;
+            end
+
+            if rankR < numel(app.FeatureNames)
+                removedIdx = setdiff(1:numel(app.FeatureNames), independentIdx);
+                removedNames = strjoin(app.FeatureNames(removedIdx), ', ');
+                warning('FluxPredictorApp:DependentPredictors', ...
+                    'Dependent predictors detected and removed: %s', removedNames);
+            end
+
+            app.ActiveFeatureNames = app.FeatureNames(independentIdx);
+            X = data(:, app.ActiveFeatureNames);
+
             app.Model = fitlm(X, data.Flux, 'Intercept', true);
             app.TrainingData = data;
 
@@ -64,14 +93,31 @@ classdef FluxPredictorApp < matlab.apps.AppBase
             end
         end
 
+        function field = fieldForFeature(app, featureName)
+            switch featureName
+                case 'FeedTemp'
+                    field = app.FeedTempField;
+                case 'PermeateTemp'
+                    field = app.PermeateTempField;
+                case 'HotFlow'
+                    field = app.HotFlowField;
+                case 'ColdFlow'
+                    field = app.ColdFlowField;
+                case 'PoreSize'
+                    field = app.PoreSizeField;
+                case 'Thickness'
+                    field = app.ThicknessField;
+                otherwise
+                    error('Unknown feature name: %s', featureName);
+            end
+        end
+
         function params = collectInput(app)
-            params = [ ...
-                app.getFieldValue(app.FeedTempField), ...
-                app.getFieldValue(app.PermeateTempField), ...
-                app.getFieldValue(app.HotFlowField), ...
-                app.getFieldValue(app.ColdFlowField), ...
-                app.getFieldValue(app.PoreSizeField), ...
-                app.getFieldValue(app.ThicknessField)];
+            params = zeros(1, numel(app.ActiveFeatureNames));
+            for idx = 1:numel(app.ActiveFeatureNames)
+                field = app.fieldForFeature(app.ActiveFeatureNames{idx});
+                params(idx) = app.getFieldValue(field);
+            end
         end
 
         function updatePrediction(app, ~, ~)
@@ -81,7 +127,8 @@ classdef FluxPredictorApp < matlab.apps.AppBase
             end
 
             params = app.collectInput();
-            predictedFlux = predict(app.Model, params);
+            inputTable = array2table(params, 'VariableNames', app.ActiveFeatureNames);
+            predictedFlux = predict(app.Model, inputTable);
             app.FluxDisplay.Text = sprintf('Predicted Flux: %.2f', predictedFlux);
         end
 
@@ -92,7 +139,7 @@ classdef FluxPredictorApp < matlab.apps.AppBase
             end
 
             actual = app.TrainingData.Flux;
-            predicted = predict(app.Model, app.TrainingData(:, app.FeatureNames));
+            predicted = predict(app.Model, app.TrainingData(:, app.ActiveFeatureNames));
 
             cla(app.Axes);
             scatter(app.Axes, actual, predicted, 60, 'filled');
