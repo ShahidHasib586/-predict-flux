@@ -53,14 +53,20 @@ classdef FluxPredictorApp < matlab.apps.AppBase
             X = data(:, app.FeatureNames);
             numericX = X{:, :};
 
-            % Detect and drop linearly dependent predictors to avoid rank
-            % deficiency warnings from FITLM.
-            [~, R, pivotIdx] = qr(numericX, 0);
-            tol = max(size(numericX)) * eps(norm(R, 'fro'));
+            % Detect and drop linearly dependent predictors (including
+            % constant columns that conflict with the intercept) to avoid
+            % rank deficiency warnings from FITLM.
+            design = [ones(size(numericX, 1), 1), numericX];
+            [~, R, pivotIdx] = qr(design, 0);
+            tol = max(size(design)) * eps(norm(R, 'fro'));
             rankR = sum(abs(diag(R)) > tol);
-            independentIdx = sort(pivotIdx(1:rankR));
 
-            if rankR == 0
+            % Exclude the intercept column (pivot value 1) when choosing
+            % which predictors to keep.
+            keptPivots = pivotIdx(1:rankR);
+            independentIdx = sort(keptPivots(keptPivots > 1) - 1);
+
+            if isempty(independentIdx)
                 warning('FluxPredictorApp:NoPredictors', ...
                     'No independent predictors available after cleaning the data.');
                 app.Model = [];
@@ -69,7 +75,7 @@ classdef FluxPredictorApp < matlab.apps.AppBase
                 return;
             end
 
-            if rankR < numel(app.FeatureNames)
+            if numel(independentIdx) < numel(app.FeatureNames)
                 removedIdx = setdiff(1:numel(app.FeatureNames), independentIdx);
                 removedNames = strjoin(app.FeatureNames(removedIdx), ', ');
                 warning('FluxPredictorApp:DependentPredictors', ...
