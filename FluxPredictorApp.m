@@ -22,6 +22,13 @@ classdef FluxPredictorApp < matlab.apps.AppBase
         ActiveFeatureNames   cell
         FeatureNames         cell
         DataFile             string
+        InputRanges          struct = struct( ...
+            'FeedTemp', [30 90], ...
+            'PermeateTemp', [5 25], ...
+            'HotFlow', [300 1200], ...
+            'ColdFlow', [300 1200], ...
+            'PoreSize', [0.1 1.0], ...
+            'Thickness', [80 200])
     end
 
     methods (Access = private)
@@ -35,6 +42,14 @@ classdef FluxPredictorApp < matlab.apps.AppBase
                 'ColdFlow', ...
                 'PoreSize', ...
                 'Thickness'};
+
+            app.InputRanges = struct( ...
+                'FeedTemp', [30 90], ...
+                'PermeateTemp', [5 25], ...
+                'HotFlow', [300 1200], ...
+                'ColdFlow', [300 1200], ...
+                'PoreSize', [0.1 1.0], ...
+                'Thickness', [80 200]);
 
             app.reloadModel();
             app.updatePrediction();
@@ -53,14 +68,20 @@ classdef FluxPredictorApp < matlab.apps.AppBase
             X = data(:, app.FeatureNames);
             numericX = X{:, :};
 
-            % Detect and drop linearly dependent predictors to avoid rank
-            % deficiency warnings from FITLM.
-            [~, R, pivotIdx] = qr(numericX, 0);
-            tol = max(size(numericX)) * eps(norm(R, 'fro'));
+            % Detect and drop linearly dependent predictors (including
+            % constant columns that conflict with the intercept) to avoid
+            % rank deficiency warnings from FITLM.
+            design = [ones(size(numericX, 1), 1), numericX];
+            [~, R, pivotIdx] = qr(design, 0);
+            tol = max(size(design)) * eps(norm(R, 'fro'));
             rankR = sum(abs(diag(R)) > tol);
-            independentIdx = sort(pivotIdx(1:rankR));
 
-            if rankR == 0
+            % Exclude the intercept column (pivot value 1) when choosing
+            % which predictors to keep.
+            keptPivots = pivotIdx(1:rankR);
+            independentIdx = sort(keptPivots(keptPivots > 1) - 1);
+
+            if isempty(independentIdx)
                 warning('FluxPredictorApp:NoPredictors', ...
                     'No independent predictors available after cleaning the data.');
                 app.Model = [];
@@ -69,7 +90,7 @@ classdef FluxPredictorApp < matlab.apps.AppBase
                 return;
             end
 
-            if rankR < numel(app.FeatureNames)
+            if numel(independentIdx) < numel(app.FeatureNames)
                 removedIdx = setdiff(1:numel(app.FeatureNames), independentIdx);
                 removedNames = strjoin(app.FeatureNames(removedIdx), ', ');
                 warning('FluxPredictorApp:DependentPredictors', ...
@@ -120,9 +141,32 @@ classdef FluxPredictorApp < matlab.apps.AppBase
             end
         end
 
+        function [isValid, message] = validateInputs(app)
+            isValid = true;
+            message = "";
+
+            for idx = 1:numel(app.ActiveFeatureNames)
+                name = app.ActiveFeatureNames{idx};
+                range = app.InputRanges.(name);
+                value = app.getFieldValue(app.fieldForFeature(name));
+
+                if value < range(1) || value > range(2)
+                    isValid = false;
+                    message = sprintf('%s must be between %.2f and %.2f', name, range(1), range(2));
+                    return;
+                end
+            end
+        end
+
         function updatePrediction(app, ~, ~)
             if isempty(app.Model)
                 app.FluxDisplay.Text = 'Model not trained yet';
+                return;
+            end
+
+            [isValid, msg] = app.validateInputs();
+            if ~isValid
+                app.FluxDisplay.Text = ['Invalid input: ', msg];
                 return;
             end
 
@@ -157,6 +201,27 @@ classdef FluxPredictorApp < matlab.apps.AppBase
             app.reloadModel();
             app.updatePrediction();
         end
+
+        function onChooseDataFile(app, ~, ~)
+            [file, path] = uigetfile({'*.xlsx;*.xls', 'Excel files'}, ...
+                'Select data file');
+
+            if isequal(file, 0)
+                return;
+            end
+
+            app.DataFile = fullfile(path, file);
+
+            try
+                app.reloadModel();
+                app.updatePrediction();
+                app.FluxDisplay.Text = ['Model reloaded from ', file];
+            catch ME
+                warning('FluxPredictorApp:LoadFailed', ...
+                    'Failed to load selected data file: %s', ME.message);
+                app.FluxDisplay.Text = 'Failed to load selected data file';
+            end
+        end
     end
 
     methods (Access = private)
@@ -169,39 +234,45 @@ classdef FluxPredictorApp < matlab.apps.AppBase
             app.ControlPanel = uipanel(app.Grid, 'Title', 'Inputs');
             app.ControlPanel.Layout.Row = 1;
             app.ControlPanel.Layout.Column = 1;
-            controlsGrid = uigridlayout(app.ControlPanel, [8 2]);
-            controlsGrid.RowHeight = repmat({'fit'}, 1, 8);
+            controlsGrid = uigridlayout(app.ControlPanel, [10 2]);
+            controlsGrid.RowHeight = repmat({'fit'}, 1, 10);
             controlsGrid.ColumnWidth = {'fit', 'fit'};
 
             % Feed temperature
             uilabel(controlsGrid, 'Text', 'Feed temperature (°C)');
             app.FeedTempField = uieditfield(controlsGrid, 'numeric', ...
-                'Limits', [0 Inf], 'Value', 60, 'ValueChangedFcn', @(src, evt) app.updatePrediction());
+                'Limits', app.InputRanges.FeedTemp, 'Value', 60, ...
+                'ValueChangedFcn', @(src, evt) app.updatePrediction());
 
             % Permeate / cold stream temperature
             uilabel(controlsGrid, 'Text', 'Cold temperature (°C)');
             app.PermeateTempField = uieditfield(controlsGrid, 'numeric', ...
-                'Limits', [0 Inf], 'Value', 20, 'ValueChangedFcn', @(src, evt) app.updatePrediction());
+                'Limits', app.InputRanges.PermeateTemp, 'Value', 20, ...
+                'ValueChangedFcn', @(src, evt) app.updatePrediction());
 
             % Hot flow rate
-            uilabel(controlsGrid, 'Text', 'Hot flow rate (mL/min)');
+            uilabel(controlsGrid, 'Text', 'Hot flow rate (mL/h)');
             app.HotFlowField = uieditfield(controlsGrid, 'numeric', ...
-                'Limits', [0 Inf], 'Value', 600, 'ValueChangedFcn', @(src, evt) app.updatePrediction());
+                'Limits', app.InputRanges.HotFlow, 'Value', 600, ...
+                'ValueChangedFcn', @(src, evt) app.updatePrediction());
 
             % Cold flow rate
-            uilabel(controlsGrid, 'Text', 'Cold flow rate (mL/min)');
+            uilabel(controlsGrid, 'Text', 'Cold flow rate (mL/h)');
             app.ColdFlowField = uieditfield(controlsGrid, 'numeric', ...
-                'Limits', [0 Inf], 'Value', 600, 'ValueChangedFcn', @(src, evt) app.updatePrediction());
+                'Limits', app.InputRanges.ColdFlow, 'Value', 600, ...
+                'ValueChangedFcn', @(src, evt) app.updatePrediction());
 
             % Membrane pore size
             uilabel(controlsGrid, 'Text', 'Pore size (µm)');
             app.PoreSizeField = uieditfield(controlsGrid, 'numeric', ...
-                'Limits', [0 Inf], 'Value', 0.22, 'ValueChangedFcn', @(src, evt) app.updatePrediction());
+                'Limits', app.InputRanges.PoreSize, 'Value', 0.22, ...
+                'ValueChangedFcn', @(src, evt) app.updatePrediction());
 
             % Membrane thickness
             uilabel(controlsGrid, 'Text', 'Thickness (µm)');
             app.ThicknessField = uieditfield(controlsGrid, 'numeric', ...
-                'Limits', [0 Inf], 'Value', 200, 'ValueChangedFcn', @(src, evt) app.updatePrediction());
+                'Limits', app.InputRanges.Thickness, 'Value', 200, ...
+                'ValueChangedFcn', @(src, evt) app.updatePrediction());
 
             % Buttons
             app.PredictButton = uibutton(controlsGrid, 'Text', 'Predict now', ...
@@ -211,6 +282,10 @@ classdef FluxPredictorApp < matlab.apps.AppBase
             app.ReloadButton = uibutton(controlsGrid, 'Text', 'Reload & retrain', ...
                 'ButtonPushedFcn', @(src, evt) app.onReload());
             app.ReloadButton.Layout.Column = [1 2];
+
+            uploadButton = uibutton(controlsGrid, 'Text', 'Load data file...', ...
+                'ButtonPushedFcn', @(src, evt) app.onChooseDataFile());
+            uploadButton.Layout.Column = [1 2];
 
             % Output label
             app.FluxDisplay = uilabel(controlsGrid, 'Text', 'Predicted Flux: --', ...
